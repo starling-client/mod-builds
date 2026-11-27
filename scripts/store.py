@@ -22,6 +22,7 @@ Only `publish`, `index` and `register` write, from jobs that run nothing of the 
 checked and uploaded, and each answer is read as JSON and written again with the fields the game
 reads, so nothing a mod made can say more than that.
 """
+import calendar
 import hashlib
 import json
 import os
@@ -243,8 +244,22 @@ def index(build, listed, read, previous=None):
         if done:
             if f"{job}.so" in names:
                 mods.append(row)
-        elif f"{job}.json" not in names:
+        # Its library there, the job is done, though its answer was pruned (`prunable`).
+        elif f"{job}.json" not in names and f"{job}.so" not in names:
             failed.append(row)
+    # Rows whose answers were pruned (`prunable`): a done one while its library is there, a failure for good always.
+    seen = {row["job"] for row in mods + failed}
+    for (job, state), row in sorted(kept.items()):
+        if job in seen or job.startswith("unplayable-") or row.get("build", build) != build:
+            continue
+        if state == "done" and f"{job}.json" not in names and f"{job}.so" in names:
+            mods.append(row)
+            seen.add(job)
+        elif state == "failed" and row.get("settled") and f"{job}.failed.json" not in names \
+                and f"{job}.json" not in names and f"{job}.so" not in names:
+            failed.append(row)
+            seen.add(job)
+    mods.sort(key=lambda row: row["job"])
     built = {row["id"] for row in mods}
     for mod, why in sorted(unplayable().items()):
         if mod not in built:
@@ -291,7 +306,37 @@ def release_assets(tag):
         ["gh", "api", "--paginate", "--slurp", f"repos/{repo()}/releases/{release['id']}/assets?per_page=100"],
         check=True, capture_output=True,
     ).stdout
-    return [{"name": a["name"], "id": a["id"]} for page in json.loads(pages) for a in page]
+    return [{"name": a["name"], "id": a["id"], "created_at": a.get("created_at", "")}
+            for page in json.loads(pages) for a in page]
+
+
+# An answer the index holds goes after this long: a phone that asked for the job has read it by then (it waits on the
+# answer file itself, and the Worker lets a request go after six hours, clean.py).
+ANSWER_HOURS = 6
+
+
+def prunable(made, listed, now=None):
+    """The assets of `listed` that are answers `made` (the index just uploaded) holds and that are older than
+    ANSWER_HOURS: a done job's `<job>.json` while its library is there, a failure for good's `<job>.failed.json`."""
+    now = time.time() if now is None else now
+    done = {row["job"] for row in made.get("mods", [])}
+    settled = {row["job"] for row in made.get("failed", []) if row.get("settled")}
+    out = []
+    for asset in listed:
+        name = asset["name"]
+        job = name[: -len(".failed.json")] if name.endswith(".failed.json") else name[: -len(".json")]
+        # A failure before the job was done is old news too.
+        held = (name.endswith(".failed.json") and (job in settled or job in done)) or (
+            name.endswith(".json") and not name.endswith(".failed.json") and job in done)
+        if not held or name == INDEX:
+            continue
+        try:
+            made_at = calendar.timegm(time.strptime(asset.get("created_at", ""), "%Y-%m-%dT%H:%M:%SZ"))
+        except ValueError:
+            continue
+        if now - made_at > ANSWER_HOURS * 3600:
+            out.append(asset)
+    return out
 
 
 def write_index(build, gh, out):
@@ -303,6 +348,12 @@ def write_index(build, gh, out):
     (out / INDEX).write_text(json.dumps(made, indent=1))
     gh("release", "upload", tag, str(out / INDEX), "--clobber")
     print(f"{tag}: {len(made['mods'])} mods, {len(made['failed'])} failed")
+    # Only once the index that holds them is up: GitHub keeps 1000 assets per release.
+    gone = prunable(made, listed)
+    for asset in gone:
+        gh("api", "-X", "DELETE", f"repos/{repo()}/releases/assets/{asset['id']}", check=False, quiet=True)
+    if gone:
+        print(f"{tag}: {len(gone)} answers the index holds pruned, {len(listed) - len(gone)} assets left")
 
 
 # ---- the builds the store serves -------------------------------------------------------------------

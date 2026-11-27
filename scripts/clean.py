@@ -61,7 +61,8 @@ def mods_prunable(listed, index):
     newest = {}
     for row in index.get("mods", []):
         key = (row.get("id"), row.get("job", "").partition(".")[2])
-        made = by_name.get(f"{row.get('job')}.json", {}).get("created_at", "")
+        # When it was built: its answer's time, or its library's once the answer was pruned (store.prunable).
+        made = (by_name.get(f"{row.get('job')}.json") or by_name.get(f"{row.get('job')}.so") or {}).get("created_at", "")
         newest.setdefault(key, []).append((made, row["job"]))
     for rows in newest.values():
         for _, job in sorted(rows, reverse=True)[1:]:

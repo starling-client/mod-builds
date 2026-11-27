@@ -259,6 +259,28 @@ class Index(unittest.TestCase):
         third = store.index(BUILD, listed[1:], lambda name: read.append(name), second)
         self.assertEqual([m["id"] for m in third["mods"]], ["carryblock"])
 
+    def test_an_answer_pruned_keeps_its_row_while_the_library_stays(self):
+        a, done = self.status("veinminer", "0.3.0")
+        b, failed = self.status("wrench", "1.0.0", state="failed")
+        old, new = "2026-11-20T23:14:48Z", "2026-11-27T12:00:00Z"
+        listed = [{"name": f"{a}.so", "id": 1, "created_at": old}, {"name": f"{a}.json", "id": 2, "created_at": old},
+                  {"name": f"{b}.failed.json", "id": 3, "created_at": old}, {"name": "index.json", "id": 4,
+                                                                             "created_at": old}]
+        first = store.index(BUILD, listed, {f"{a}.json": done, f"{b}.failed.json": failed}.get)
+        now = store.calendar.timegm((2026, 11, 27, 13, 0, 0, 0, 0, 0))
+        self.assertEqual(sorted(x["id"] for x in store.prunable(first, listed, now)), [2, 3])
+        # A fresh answer stays: a phone that asked may still be reading it.
+        fresh = [dict(x, created_at=new) for x in listed]
+        self.assertEqual(store.prunable(first, fresh, now), [])
+        # The answers gone, the rows stay: the library is there, and a failure for good is for good.
+        left = [x for x in listed if x["id"] not in (2, 3)]
+        second = store.index(BUILD, left, lambda name: self.fail(f"read {name}"), first)
+        self.assertEqual([m["id"] for m in second["mods"]], ["veinminer"])
+        self.assertEqual([m["id"] for m in second["failed"] if not m["job"].startswith("unplayable-")], ["wrench"])
+        # The library gone too (clean.py), its mod goes.
+        third = store.index(BUILD, [x for x in left if x["id"] != 1], lambda name: None, second)
+        self.assertEqual(third["mods"], [])
+
     def test_an_answer_that_lies_about_its_job_is_left_out(self):
         a, done = self.status("veinminer", "0.3.0")
         done["source"] = "f" * 64
